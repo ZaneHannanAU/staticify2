@@ -4,12 +4,20 @@ const os = require('os');
 const crypto = require('crypto');
 const {EventEmitter} = require('events');
 const util = require('util');
-const walkdir = require('./walkdir');
+const walkdir = require('ewalkdir');
+const mime = require('mime');
+const zlib = {
+  br: require('iltorb').compressStream,
+  gz: require('zlib').createGzip,
+  deflate: require('zlib').createDeflate
+};
+const accepts = require('accepts');
 
 const tmp = util.promisify(fs.mkdtemp)
 
 const HASHER = 'md5',
       DIGEST = 'hex',
+      CONTENT_DIGEST = 'base64',
       PATH = path.join(process.cwd(), 'public'),
       getVersionedPath = Symbol.for('getVersionedPath')
 // some constants to allow easier use.
@@ -22,29 +30,75 @@ class FileHashAgent extends EventEmitter {
    * @arg {string} hasher to use to hash the file.
    * @arg {string} digest to consume the hash.
    */
-  constructor({path, hasher = HASHER, digest = DIGEST, tmpdir}) {
+  constructor({filename, relPath, tmpdir}) {
     if (!path) throw new SyntaxError(
       'FileHashAgent is not usable without a path',
       'PATH_NOT_PROVIDED'
     );
     super()
-    this.path = path;
-    this.hasher = hasher;
-    this.digest = digest;
+    this.path = filename;
+    this.relPath = relPath;
+    this.basename = path.basename(filename);
+    this.extname = path.extname(filename);
+
     this.tmpdir = tmpdir;
-    this.hash = undefined;
+    this.files = {
+      gz: null,
+      br: null,
+      deflate: null
+    };
     setImmediate(this.init)
   }
   async init() {
-    let hashing = crypto.createHash(this.hasher);
+    let hashing = crypto.createHash(HASHER);
     let file = fs.createReadStream(this.path);
     file.on('end', () => {
-      this.hash = hashing.digest(this.digest);
-      this.emit('hashready', this.hash);
+      const hash = hashing.digest();
+      this.HEX_DIGEST = hash.toString('hex');
+      this.B64_DIGEST = hash.toString('base64');
+      this.emit('hashready', {
+        hash, hex: this.HEX_DIGEST, base64: this.B64_DIGEST
+      });
     });
-    file.pipe(hashing)
+    file.pipe(hashing);
+
+    this.on('hashready', ({hex}) => {
+      for (const stream of await Object.getOwnPropertyNames(zlib)) {
+        let name = path.join(
+          this.tmpdir, hex + this.extname + stream
+        );
+        let z = zlib[stream]();
+        let output = fs.createWriteStream(name);
+        let input = fs.createReadStream(this.path);
+        input.on('end', () => this.files[stream] = name)
+        input.pipe(z).pipe(output);
+      }
+    })
   }
-  middleware(req, res) {
+  async middleware(req, res) {
+    if (this.hasher && this.hash)
+      res.setHeader('Content-MD5', this.B64_DIGEST)
+    ;;
+
+    let encodings = new Set(await accepts(req).encodings());
+
+    if (encodings.has('br') && this.files.br) {
+      res.setHeader('Content-Encoding', 'br');
+      return fs.createReadStream(this.files.br).pipe(res);
+    } else if (
+      (encodings.has('gzip') || encodings.has('gz'))
+      && this.files.gz
+    ) {
+      res.setHeader('Content-Encoding', 'gzip');
+      return fs.createReadStream(this.files.gz).pipe(res);
+    } else {
+      return fs.createReadStream(this.path).pipe(res);
+    };
+  }
+  url(prefix = '') {
+    return prefix
+    ? path.posix.join(prefix, this.hash || this.relPath)
+    : this.hash || this.relPath
   }
 }
 
@@ -59,8 +113,7 @@ class staticify2 extends EventEmitter {
    * @arg {number} maxDepth - alias for depth
    */
   constructor({
-    paths, path, hasher = HASHER, digest = DIGEST,
-    maxDepth = 10, depth = maxDepth
+    paths, path, maxDepth = 10, depth = maxDepth
   } = {}) {
     if (!(paths || path)) throw new SyntaxError(
       'path or paths argument is required',
@@ -68,9 +121,8 @@ class staticify2 extends EventEmitter {
     );;
     super()
 
-    this.hasher = hasher;
-    this.digest = digest; // always use hex digests for hashes.
-    this.depth = depth; //
+    this.hasher = HASHER; // force hasher to be MD5
+    this.depth = depth; // If maxDepth is set, depth === maxDepth; if depth is set, depth === depth
 
     if (Array.isArray(paths))
       this.paths = paths
@@ -117,62 +169,70 @@ class staticify2 extends EventEmitter {
       depth: this.depth,
       emitDirs: false
     });
-    walker.on('file', (path, stats) => {
-      let agent = new FileHashAgent({
-        path, tmpdir, hasher: this.hasher, digest: this.digest
-      }).on('hashready', (hash) => {
-        this.map.set(hash, agent)
-      })
+    walker.on('file', ({path, stats}) => {
+      let agent = new FileHashAgent({path, tmpdir})
+      .on('hashready', ({hex, base64}) => setImmediate(() => {
+        this.map.set(hex, agent).set(base64, agent)
+      }))
       this.map.set(path, agent)
     })
   }
 
   /**
    * @method createMiddleware
-   * @arg {regex} prefix prefixing the URL, if you use Express this is unnecessary to set.
+   * @arg {string} prefix prefixing the URL, if you use Express this is unnecessary to set.
    * @arg {boolean} createLocals - whether to prefix the locals or not.
+   * @arg {boolean} caseSensitive - dunno
    */
-  createMiddleware({prefix = /^\//g, createLocals, caseSensitive} = {}) {
+  createMiddleware({prefix = '/', createLocals, caseSensitive} = {}) {
     const self = this;
-    const getAgent = (agent) => self.map.get(agent);
-    const hasAgent = (agent) => self.map.has(agent);
-
-    if (typeof prefix === 'string')
-      prefix = new RegExp(`^${prefix}`, caseSensitive ? 'g' : 'ig')
-    ;;
 
     return async function middleware(req, res, next) {
       if (createLocals)
         typeof res.locals === 'object'
-        ? res.locals.staticify = staticify
-        : res.locals = {
+        ? (
+          res.locals.staticify
+          ? null
+          : res.locals.staticify = self,
+          res.locals.getVersionedPath
+          ? null
+          : res.locals.getVersionedPath = (url) => self.getVersionedPath({
+            prefix, url
+          })
+        ) : res.locals = {
           staticify: self,
           getVersionedPath: (url) => self.getVersionedPath({
-            prefix, base: req.baseUrl, url
+            prefix, url
           })
         }
       ;;
+    }
+  }
 
-
+  /** @method createServe
+    * @arg {string} prefix
+    */
+  createServe(prefix) {
+    const self = this;
+    return async function serve(req, res) {
+      const version = await self.getVersion(prefix, req.path || req.url)
+      return version.middleware(req, res);
     }
   }
 
   /**
    * @method getVersionedPath
-   * @arg {regex} prefix
+   * @arg {string} prefix
    * @arg {string} url
    */
   getVersionedPath(opts) {
     if (typeof opts === 'string')
       opts = {url: opts}
     ;;
-    if (typeof opts.prefix === 'string')
-      opts.prefix = new RegExp('^'+opts.prefix, 'g')
-    ;;
     return this[getVersionedPath](opts)
   }
-  [getVersionedPath]({prefix = /^\//, url}) {
-    return this.getVersion(prefix, url).url;
+  [getVersionedPath]({prefix = '/', url, base}) {
+    return this.getVersion(prefix, url).url(prefix);
   }
   getVersion(prefix, url) {
     let rel = String(url).replace(prefix, '')
