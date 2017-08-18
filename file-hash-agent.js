@@ -26,11 +26,12 @@ const ZLIB_KEYS = new Set(Object.getOwnPropertyNames(zlib)),
         file.pipe(hash)
         return {file, hash}
       },
-      SERVER = `staticify2 agent ${version}`,
+      NOT_ALLOWED = {Allow: ['GET', 'HEAD']},
+      SERVER = {Server: `staticify2 agent ${version}`},
       HEADERS = new Map([
-        ['Server', SERVER],
+        ['Server', SERVER.Server],
         ['Vary', 'Accept-Encoding'],
-        ['Cache-Control', ['no-transform', 'public', `max-age=${36e2*365.25}`]]
+        ['Cache-Control', ['no-transform', 'public', `max-age=${3600*365.25}`]]
       ]);
 
 const setBulk = (map = new Map(HEADERS), iter = []) => {
@@ -55,11 +56,15 @@ class FileHashAgent extends EventEmitter {
     let mime = parent.mime.lookup(filename)
     super()
     this.parent = parent;
+    this.trailers = new Map([
+      ['Content-Location', relTop],
+      ['Expires', () => new Date(Date.now() + 36e5*24*365.25).toGMTString()]
+    ]);
     this.headers = setBulk(new Map(HEADERS), [
       ['Last-Modified', stats.mtime.toGMTString()],
       ['Content-Length', stats.size],
       ['Content-Type', mime],
-      ['Content-Location', relTop],
+      ['Trailer', () => [...this.trailers.keys()]]
     ]);
     this.compressible = COMPRESSIBLE.test(mime); // don't compress if video/image/etc
 
@@ -110,14 +115,15 @@ class FileHashAgent extends EventEmitter {
       })
     })
 
-    let [{b64: md64, hex: mdH},{b64: p64, hex: pH},tmpdir] = await Promise.all([
+    let [{b64:md64, hex:mdH}, {b64:p64, hex:pH}, tmpdir] = await Promise.all([
       this.onceHashReady, this.oncePoolReady,
       this.parent.onceTmpDirReady
     ]);
-    this.headers.set('Content-MD5', md64).set('ETag', `"${p64}"`)
+    let trailers = this.headers.get('Trailers');
+    this.trailers.set('Content-MD5', md64).set('ETag', `"${p64}"`)
     if (this.parent.compress && this.compressible) {
       for (const stream of ZLIB_KEYS) {
-        let zname = path.join(tmpdir, md64+'-'+p64+this.extname+'.'+stream);
+        let zname = path.join(tmpdir, md64+'.'+p64+this.extname+'.'+stream);
         // Something like /tmp/staticify2-itXde2/(b64<22>)-(b64<86>).js.br
         if (await exists(zname)) break;;
         // Shouldn't exist but otherwise will likely break something otherwise.
@@ -146,25 +152,25 @@ class FileHashAgent extends EventEmitter {
       let {method, headers} = req;
       if (!method || method === 'GET') {
         if (headers['If-None-Match']
-          ? headers['If-None-Match'] !== this.headers.get('ETag')
+          ? headers['If-None-Match'] !== this.trailers.get('ETag')
           : headers['If-Modified-Since']
             ? headers['If-Modified-Since'] !== this.headers.get('Last-Modified')
             : true
         ) {
           let {['Content-Encoding']: enc} = await this.setHeaders(req, res)
           fs.createReadStream(this.files[enc]).pipe(res);
+          return await this.setTrailers(req, res)
         } else {
-          res.writeHead(304, {
-            Server: HEADERS.get('Server')
-          })
+          res.writeHead(304, SERVER)
         }
       } else if (method === 'HEAD') {
-        await this.setHeaders(req, res, 204)
+        await Promise.all([
+          this.setHeaders(req, res, 204),
+          this.setTrailers(req, res)
+        ]);
         res.end()
       } else {
-        res.writeHead(405, '', {
-          Allow: ['GET', 'HEAD']
-        })
+        res.writeHead(405, `Method ${method} Not Allowed`, NOT_ALLOWED)
         return res.end()
       }
     } catch (e) {
@@ -176,23 +182,38 @@ class FileHashAgent extends EventEmitter {
    * @method setHeaders
    * @arg {request} req
    * @arg {response} res
-   * @returns {object}
+   * @returns {headers}
    */
   async setHeaders(req, res, satus = 200) {
-    let sentHeaders = Object.create(null);
-    for (const [name, value] of this.headers) sentHeaders[name] = value;;
+    let headers = Object.create(null);
+    for (const [k, v] of this.headers)
+      headers[k] = typeof v !== 'function' ? v : v()
+    ;;
 
     let encodings = new Set(accepts(req).encodings());
-    sentHeaders.encoding = 'identity';
+    headers['Content-Encoding'] = 'identity';
 
     for (const enc of ZLIB_KEYS) {
       if (encodings.has(enc) && this.files[enc]) {
-        sentHeaders['Content-Encoding'] = enc;
+        headers['Content-Encoding'] = enc;
         break;
       }
     }
-    res.writeHead(status, sentHeaders)
-    return sentHeaders;
+    res.writeHead(status, headers)
+    return headers;
+  }
+
+  /**
+   * @method setTrailers
+   * @arg {request} req
+   * @arg {response} res
+   * @returns {trailers}
+   */
+  async setTrailers(req, res) {
+    let t = Object.create(null)
+    for (const [k, v] of this.trailers) t[k] = typeof v !== 'function' ? v : v()
+    res.addTrailers(t)
+    return t;
   }
   url(prefix = '', style = 'hash') {
     return this.hashes

@@ -18,7 +18,7 @@ const FileHashAgent = require('./file-hash-agent');
 const hashPool = /\b([0-9a-f]{32}|[0-9a-f]{128})\b/g
 // is a break; hex data; is end of line.
 // Matches base64 (b64) values for md5 (22|24) and whirlpool (86|88).
-const hashPool64 = /(?=\b|^)([0-9A-Za-z_-]{22}|[0-9A-Za-z_-]{86})$/gm
+const hashPool64 = /(?=\b|^)([0-9A-Za-z_-]{22}|[0-9A-Za-z_-]{86})$/g
 // Is is a break; b64 data; is definitely end of line.
 
 
@@ -230,25 +230,20 @@ class staticify2 extends EventEmitter {
    * @async
    */
   async setSourceMap(reltop, agent) {
-    let {hex} = await agent.onceHashReady
+    let {vURL: {md5, pool}} = await agent.onceAllReady
     let file = reltop.slice(0,-4)
-    if (this.map.has(file)) {
-      this.map.get(file).headers.set('SourceMap', this.reltop + hex)
-    } else {
-      let iter = 0;
-      let interval = setInterval(() => {
-        if (this.map.has(file)) {
-          clearInterval(interval)
-          this.map.get(file).headers.set('SourceMap', this.reltop + hex)
-        } else {
-          if (iter++ > 9) {
-            clearInterval(interval)
-          }
-        }
-      }, 1e3);
-    }
+    if (this.map.has(file)) this.map.get(file).trailers.set('SourceMap', pool)
+    else let iter = 0, interval = setInterval(() => {
+      if (this.map.has(file)) {
+        clearInterval(interval)
+        this.map.get(file).trailers.set('SourceMap', pool)
+      } else if (iter++ > 9) clearInterval(interval);;
+    }, 1e3);
   }
 }
 
 exports = module.exports = staticify2;
 exports.FileHashAgent = FileHashAgent;
+
+exports.hashPool = hashPool // base16 (hex)
+exports.hashPool64 = hashPool64 // base64
