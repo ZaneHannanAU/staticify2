@@ -15,10 +15,10 @@ const PATHS = () => [path.join(process.cwd(), 'public')]
 const FileHashAgent = require('./file-hash-agent');
 // RegExp for matching hashes.
 // Matches base16 (hex) values for md5 (32) and whirlpool (128).
-const hashPool = /\b([0-9a-f]{32}\b|[0-9a-f]{128}\b)/g
+const hashPool = /\b([0-9a-f]{32}|[0-9a-f]{128})\b/g
 // is a break; hex data; is end of line.
 // Matches base64 (b64) values for md5 (22|24) and whirlpool (86|88).
-const hashPool64 = /(?=\b|^)((?:[0-9A-Za-z_-]{22}|[0-9A-Za-z_-]{86}))(?:==)?$/gm
+const hashPool64 = /(?=\b|^)([0-9A-Za-z_-]{22}|[0-9A-Za-z_-]{86})$/gm
 // Is is a break; b64 data; is definitely end of line.
 
 
@@ -135,7 +135,9 @@ class staticify2 extends EventEmitter {
       followSymlinks: true
     }).on('file', ({dir: filename, stats, relTop}) => {
       let agent = new FileHashAgent({filename, stats, relTop, parent: self});;
+
       self.map.set(filename, agent).set(relTop, agent)
+
       agent.onceHashReady.then(({hex, b64}) => {
         self.map.set(hex, agent).set(b64, agent)
       })
@@ -144,10 +146,10 @@ class staticify2 extends EventEmitter {
       })
     })
 
-    if (eTempdir || !this.compress) return;
-
-    // I'm using async so it's technically synchronous but not.
-    self.emit('tmpdir_ready', await tmp(tempdir));
+    if (!eTempdir || this.compress)
+      self.emit('tmpdir_ready', await tmp(tempdir))
+      // tmpdir is probably gonna work.
+    ;;
   }
 
   /**

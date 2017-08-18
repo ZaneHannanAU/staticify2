@@ -9,14 +9,12 @@ const zlib = {
   gzip: require('zlib').createGzip,
   deflate: require('zlib').createDeflate
 };
-const ZLIB_KEYS = new Set(Object.getOwnPropertyNames(zlib));
 const accepts = require('accepts');
 
 // some constants
-const DIGEST = 'hex',
-      CONTENT_DIGEST = 'base64', B64RE = /\+|\/|=+/g,
+const ZLIB_KEYS = new Set(Object.getOwnPropertyNames(zlib)),
       COMPRESSIBLE = /text|application(?!\/octet-stream)/,
-      year = 60 * 60 * 24 * 7 * 52,
+      B64RE = /\+|\/|=+/g,
       exists = f => new Promise(r => fs.stat(f, (e, s) => e ? r(!e) : r(s))),
       URLB64 = buf => buf.toString('base64').replace(
         B64RE, m => m === '+' ? '-' : (m === '/' ? '_' : '')),
@@ -29,9 +27,10 @@ const DIGEST = 'hex',
         return {file, hash}
       },
       SERVER = `staticify2 agent ${version}`,
-      HEADERS = new Map([['Server', SERVER],
+      HEADERS = new Map([
+        ['Server', SERVER],
         ['Vary', 'Accept-Encoding'],
-        ['Cache-Control', ['no-transform', 'public', `max-age=${year}`]]
+        ['Cache-Control', ['no-transform', 'public', `max-age=${36e2*365.25}`]]
       ]);
 
 const setBulk = (map = new Map(HEADERS), iter = []) => {
@@ -44,19 +43,19 @@ class FileHashAgent extends EventEmitter {
    * @constructor FileHashAgent
    * @extends {events} eventemitter
    * @arg {string} filename to hash its contents or use.
-   * @arg {fs.Stats as object} stats 
+   * @arg {fs.Stats as object} stats
    * @arg {string} relPath of the file
    * @arg {staticify2} parent of the agent.
    */
   constructor({filename, stats, relTop, parent}) {
-    if (!path) throw new SyntaxError(
+    if (!filename) throw new SyntaxError(
       'FileHashAgent is not usable without a filename',
       'PATH_NOT_PROVIDED'
     );
     let mime = parent.mime.lookup(filename)
     super()
     this.parent = parent;
-    this.headers = setBulk(undefined, [
+    this.headers = setBulk(new Map(HEADERS), [
       ['Last-Modified', stats.mtime.toGMTString()],
       ['Content-Length', stats.size],
       ['Content-Type', mime],
@@ -78,6 +77,7 @@ class FileHashAgent extends EventEmitter {
 
     this.onceHashReady = new Promise(r => this.once('hash_ready', r));
     this.oncePoolReady = new Promise(r => this.once('pool_ready', r));
+    this.onceAllReady = new Promise(r => this.once('all_ready', r));
 
     setImmediate(this.init.bind(this))
   }
@@ -110,10 +110,9 @@ class FileHashAgent extends EventEmitter {
       })
     })
 
-    let [tmpdir,{b64: md64, hex: mdH},{b64: p64, hex: pH}] = await Promise.all([
-      this.parent.onceTmpDirReady,
-      this.onceHashReady,
-      this.oncePoolReady
+    let [{b64: md64, hex: mdH},{b64: p64, hex: pH},tmpdir] = await Promise.all([
+      this.onceHashReady, this.oncePoolReady,
+      this.parent.onceTmpDirReady
     ]);
     this.headers.set('Content-MD5', md64).set('ETag', `"${p64}"`)
     if (this.parent.compress && this.compressible) {
@@ -130,6 +129,10 @@ class FileHashAgent extends EventEmitter {
         input.pipe(z).pipe(output);
       }
     }
+    this.emit('all_ready', {md64, mdHex: mdH, pb64: p64, pHex: pH, vURL: {
+      md5: this.dirname + this.basename + '.' + md64 + this.extname,
+      pool: this.dirname + this.basename + '.' + p64 + this.extname
+    }});
   }
 
   /**
@@ -192,45 +195,23 @@ class FileHashAgent extends EventEmitter {
     return sentHeaders;
   }
   url(prefix = '', style = 'hash') {
-    switch (style) {
-      case 'hashHex':
-      case 'hash16':
-      case 'hash':
-        return prefix
-          ? path.posix.join(prefix, this.hash.mdHex)
-          : this.hash.mdHex
-        ;
-      case 'poolHex':
-      case 'pool16':
-      case 'pool':
-        return prefix
-          ? path.posix.join(prefix, this.hash.poolHex)
-          : this.hash.poolHex
-        ;
-      case 'hash64':
-        return prefix
-          ? path.posix.join(prefix, this.hash.md64)
-          : this.hash.md64
-        ;
-      case 'pool64':
-        return prefix
-          ? path.posix.join(prefix, this.hash.pool64)
-          : this.hash.pool64
-        ;
-      case 'pathHash':
-        return prefix
-          ? path.posix.join(prefix, this.hash.pathHash)
-          : this.hash.pathHash
-        ;
-      case 'relPath':
-      default:
-        return this.relPath
-    }
+    return this.hashes
+      ? (style === 'hash' ?  : )
+      : false
   }
 }
 
+// Main
 exports = module.exports = FileHashAgent;
+
+// Constants
+exports.B64RE = B64RE;
 exports.SERVER = SERVER;
-exports.URLB64 = URLB64;
 exports.HEADERS = HEADERS;
+exports.ZLIB_KEYS = ZLIB_KEYS;
+
+// Functions
+exports.zlib = zlib;
+exports.URLB64 = URLB64;
 exports.exists = exists;
+exports.setBulk = setBulk;
