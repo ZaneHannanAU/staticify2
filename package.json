@@ -1,6 +1,6 @@
 {
   "name": "staticify2",
-  "version": "1.0.0",
+  "version": "v1.1.0",
   "description": "Staticify in an event system.",
   "main": "staticify2.js",
   "scripts": {
@@ -27,6 +27,9 @@
   "license": "GPL-3.0",
   "bugs": {
     "url": "https://github.com/ZaneHannanAU/staticify2/issues"
+  },
+  "engines": {
+    "node": ">=7.6.0"
   },
   "homepage": "https://github.com/ZaneHannanAU/staticify2#readme",
   "dependencies": {
