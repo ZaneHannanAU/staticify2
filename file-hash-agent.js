@@ -137,8 +137,8 @@ class FileHashAgent extends EventEmitter {
     };;
 
     this.emit('all_ready', {md64, mdHex: mdH, pb64: p64, pHex: pH, vURL: {
-      md5: this.dirname + this.basename + '.' + md64 + this.extname,
-      pool: this.dirname + this.basename + '.' + p64 + this.extname
+      md5: path.join(this.dirname, this.basename + '.' + md64 + this.extname),
+      pool: path.join(this.dirname, this.basename + '.' + p64 + this.extname)
     }});
   }
 
