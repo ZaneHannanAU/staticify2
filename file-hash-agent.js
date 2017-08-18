@@ -66,7 +66,8 @@ class FileHashAgent extends EventEmitter {
       ['Content-Type', mime],
       ['Trailer', () => [...this.trailers.keys()]]
     ]);
-    this.compressible = COMPRESSIBLE.test(mime); // don't compress if video/image/etc
+    this.compress = COMPRESSIBLE.test(mime) && parent.compress;
+    // don't compress if video/image/etc
 
     this.path = filename;
     this.relPath = relTop;
@@ -121,20 +122,20 @@ class FileHashAgent extends EventEmitter {
     ]);
     let trailers = this.headers.get('Trailers');
     this.trailers.set('Content-MD5', md64).set('ETag', `"${p64}"`)
-    if (this.parent.compress && this.compressible) {
-      for (const stream of ZLIB_KEYS) {
-        let zname = path.join(tmpdir, md64+'.'+p64+this.extname+'.'+stream);
-        // Something like /tmp/staticify2-itXde2/(b64<22>)-(b64<86>).js.br
-        if (await exists(zname)) break;;
-        // Shouldn't exist but otherwise will likely break something otherwise.
-        let z = zlib[stream]();
-        let output = fs.createWriteStream(zname);
-        // Save to a temporary directory
-        let input = fs.createReadStream(this.path);
-        input.on('end', () => this.files[stream] = zname)
-        input.pipe(z).pipe(output);
-      }
-    }
+    if (this.compress) for (const stream of ZLIB_KEYS) {
+      // zipname or something.
+      let zn = path.join(tmpdir, md64 +'.'+ p64 + this.extname +'.'+ stream);
+      // Something like /tmp/staticify2-itXde2/(b64<22>).(b64<86>).js.br
+      if (await exists(zn)) break;;
+      // Shouldn't exist but otherwise will likely break something otherwise.
+      let z = zlib[stream]();
+      let output = fs.createWriteStream(zn);
+      // Save to a temporary directory
+      let input = fs.createReadStream(this.path);
+      input.on('end', () => this.files[stream] = zn)
+      input.pipe(z).pipe(output);
+    };;
+
     this.emit('all_ready', {md64, mdHex: mdH, pb64: p64, pHex: pH, vURL: {
       md5: this.dirname + this.basename + '.' + md64 + this.extname,
       pool: this.dirname + this.basename + '.' + p64 + this.extname
@@ -162,19 +163,20 @@ class FileHashAgent extends EventEmitter {
           return await this.setTrailers(req, res)
         } else {
           res.writeHead(304, SERVER)
+          return res.end()
         }
       } else if (method === 'HEAD') {
         await Promise.all([
           this.setHeaders(req, res, 204),
           this.setTrailers(req, res)
         ]);
-        res.end()
+        return res.end()
       } else {
         res.writeHead(405, `Method ${method} Not Allowed`, NOT_ALLOWED)
         return res.end()
       }
     } catch (e) {
-      res.end(null)
+      return res.end(null)
     }
   }
 
