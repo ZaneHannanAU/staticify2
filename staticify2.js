@@ -18,7 +18,7 @@ const FileHashAgent = require('./file-hash-agent');
 const hashPool = /\b([0-9a-f]{32}|[0-9a-f]{128})\b/g
 // is a break; hex data; is end of line.
 // Matches base64 (b64) values for md5 (22|24) and whirlpool (86|88).
-const hashPool64 = /(?=\b|^)([0-9A-Za-z_-]{22}|[0-9A-Za-z_-]{86})$/g
+const hashPool64 = /(?=\b|^|\/)([0-9A-Za-z_-]{22}|[0-9A-Za-z_-]{86})$/g
 // Is is a break; b64 data; is definitely end of line.
 
 
@@ -71,7 +71,7 @@ class staticify2 extends EventEmitter {
     }
     this.relTop = relTop;
 
-    this.map = new Map();
+    this.map = new Map([[null, null], ['', null]]);
     this.ucache = new Map();
 
     this.ready = false;
@@ -144,6 +144,9 @@ class staticify2 extends EventEmitter {
       agent.oncePoolReady.then(({hex, b64}) => {
         self.map.set(hex, agent).set(b64, agent)
       })
+      agent.onceAllReady.then(({vURL: {md5, pool, smart}}) => {
+        self.map.set(md5, agent).set(pool, agent).set(smart, agent)
+      })
     })
 
     if (!eTempdir || this.compress)
@@ -190,9 +193,7 @@ class staticify2 extends EventEmitter {
     const getVersion = this.getVersion.bind(this, prefix);
     return async function serve(req, res) {
       let v = await getVersion(req.path || req.url)
-      if (v) {
-        v.middleware(req, res)
-      }
+      if (v) return v.middleware(req, res)
     }
   }
 
@@ -201,26 +202,27 @@ class staticify2 extends EventEmitter {
    * @arg {string} prefix
    * @arg {string} url
    */
-  getVersionedPath(opts) {
-    if (typeof opts === 'string')
-      opts = {url: opts}
-    ;;
-    let v = this.getVersion(opts.prefix, opts.url)
-    return v.url ? v.url(opts.prefix, opts.style) : v;
+  getVersionedPath(URL, style) {
+    let v = this.getVersion(URL)
+    return v.url ? v.url(style) : v;
   }
 
   /**
    * @method getVersion
-   * @arg {string} prefix
    * @arg {string|url} URL
    * @returns {FileHashAgent}
    */
-  getVersion(prefix = this.relTop, URL) {
-    let [,v] = URL.match(hashPool)
-            || URL.match(hashPool64)
-            || [URL, url.parse(URL).pathname]
-    ;
-    return this.map.get(v);
+  getVersion(URL) {
+    let pn = url.parse(String(URL)).pathname;
+    return this.map.get(pn)
+        || this.map.get(
+          pn.match(hashPool)
+          ? pn.match(hashPool)[1]
+          : pn.match(hashPool64)
+            ? pn.match(hashPool64)[1]
+            : null
+        )
+    ;;
   }
 
   /**
@@ -229,20 +231,21 @@ class staticify2 extends EventEmitter {
    * @arg {FileHashAgent} agent
    * @async
    */
-  async setSourceMap(reltop, agent) {
-    let {vURL: {md5, pool}} = await agent.onceAllReady
-    let file = reltop.slice(0,-4)
-    if (this.map.has(file)) this.map.get(file).trailers.set('SourceMap', pool)
+  async setSourceMap(filename, agent) {
+    let file = filename.slice(0,-4),
+    {vURL: {smart}} = await agent.onceAllReady;
+
+    if (this.map.has(file)) this.map.get(file).trailers.set('SourceMap', smart)
     else let iter = 0, interval = setInterval(() => {
       if (this.map.has(file)) {
         clearInterval(interval)
-        this.map.get(file).trailers.set('SourceMap', pool)
+        this.map.get(file).trailers.set('SourceMap', smart)
       } else if (iter++ > 9) clearInterval(interval);;
-    }, 1e3);
+    }, 1e3); // 10 seconds or bust
   }
 }
 
-exports = module.exports = staticify2;
+exports=module.exports= staticify2;
 exports.FileHashAgent = FileHashAgent;
 
 exports.hashPool = hashPool // base16 (hex)

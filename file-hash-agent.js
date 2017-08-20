@@ -12,22 +12,26 @@ const zlib = {
 const accepts = require('accepts');
 
 // some constants
-const ZLIB_KEYS = new Set(Object.getOwnPropertyNames(zlib)),
-      COMPRESSIBLE = /text|application(?!\/octet-stream)/,
-      B64RE = /\+|\/|=+/g,
+const COMPRESSIBLE = /xml|\btext\b|application(?!\/octet-stream)/,
+      // image/svg+xml, text/*, application not octet-stream.
       exists = f => new Promise(r => fs.stat(f, (e, s) => e ? r(!e) : r(s))),
+      // resolves to a truthy value with stats just in case.
+      B64RE = /\+|\/|=+/g,
+      // base64 RegExp replacer.
       URLB64 = buf => buf.toString('base64').replace(
         B64RE, m => m === '+' ? '-' : (m === '/' ? '_' : '')),
+      // URL base64 encoder.
       createHasher = (hasher = 'md5', filename, ...writeHead) => {
         let hash = crypto.createHash(hasher)
-        for (const block of writeHead) hash.write(String(block));;
+        for (const block of writeHead) hash.write(block);;
         if (!filename) return hash
-        let file = fs.createReadStream(filename)
-        file.pipe(hash)
-        return {file, hash}
+        return fs.createReadStream(filename).pipe(hash)
       },
+      // hashing.
+      // Static stuff.
       NOT_ALLOWED = {Allow: ['GET', 'HEAD']},
       SERVER = {Server: `staticify2 agent ${version}`},
+      ZLIB_KEYS = new Set(Object.getOwnPropertyNames(zlib)),
       HEADERS = new Map([
         ['Server', SERVER.Server],
         ['Vary', 'Accept-Encoding'],
@@ -66,17 +70,17 @@ class FileHashAgent extends EventEmitter {
       ['Content-Type', mime],
       ['Trailer', () => [...this.trailers.keys()]]
     ]);
-    this.compress = COMPRESSIBLE.test(mime) && parent.compress;
+    this.compress = parent.compress && COMPRESSIBLE.test(mime);
     // don't compress if video/image/etc
 
     this.path = filename;
     this.relPath = relTop;
-    this.dirname = path.posix.dirname(relTop);
-    this.basename = path.posix.basename(relTop, '.map');
+    this.dir = path.posix.dirname(relTop);
+    this.base = path.posix.basename(relTop, '.map');
 
-    this.extname = path.extname(filename);
-    if (this.extname === '.map')
-      parent.setSourceMap(filename, this)
+    this.ext = path.extname(filename);
+    if (this.ext === '.map')
+      setImmediate(parent.setSourceMap.bind(parent, filename, this))
     ;;
 
     this.files = {identity: this.path};
@@ -94,40 +98,34 @@ class FileHashAgent extends EventEmitter {
    * @private
    */
   async init() {
-    let {file: file_md5, hash: md5sum} = createHasher('md5', this.path)
-    file_md5.on('end', () => {
-      const hash = md5sum.digest();
-      let b64 = URLB64(hash);
-      this.emit('hash_ready', {
-        hash, hex: hash.toString('hex'), b64, base64: b64,
-        toString: hash.toString.bind(hash, 'hex')
-      })
-    })
+    let md5 = createHasher('md5', this.path)
+    .on('readable', (hash = md5.read()) => !h ? 0 : this.emit('hash_ready', {
+      toString: (s = 'hex') => hash.toString(s), hex: hash.toString('hex'),
+      base64: hash.toString('base64'), b64: URLB64(hash)
+    }));;
 
-    let {file: file_whirlpool, hash: whirlpool} = createHasher(
-      'md5', this.path, this.relTop, this.headers.get('Last-Modified')
-    );;
-    file_whirlpool.on('end', () => {
-      const pool = whirlpool.digest()
-      let b64 = URLB64(pool);
-      this.emit('pool_ready', {
-        pool, hex: pool.toString('hex'), b64, base64: b64,
-        toString: pool.toString.bind(pool, 'hex')
-      })
-    })
+    let whirl = createHasher('whirlpool', this.path, this.relTop)
+    .on('readable', (pool = whirl.read()) => !h ? 0 : this.emit('pool_ready', {
+      toString: (s = 'hex') => pool.toString(s), hex: pool.toString('hex'),
+      base64: pool.toString('base64'), b64: URLB64(pool)
+    }));;
 
     let [{b64:md64, hex:mdH}, {b64:p64, hex:pH}, tmpdir] = await Promise.all([
       this.onceHashReady, this.oncePoolReady,
       this.parent.onceTmpDirReady
     ]);
-    let trailers = this.headers.get('Trailers');
+
     this.trailers.set('Content-MD5', md64).set('ETag', `"${p64}"`)
+
     if (this.compress) for (const stream of ZLIB_KEYS) {
       // zipname or something.
-      let zn = path.join(tmpdir, md64 +'.'+ p64 + this.extname +'.'+ stream);
+      let zn = path.join(tmpdir, md64 +'.'+ p64 + this.ext +'.'+ stream);
       // Something like /tmp/staticify2-itXde2/(b64<22>).(b64<86>).js.br
-      if (await exists(zn)) break;;
-      // Shouldn't exist but otherwise will likely break something otherwise.
+      if (await exists(zn)) {
+        // Shouldn't exist but very likely the exact same.
+        this.files[stream] = zn;
+        continue;
+      }
       let z = zlib[stream]();
       let output = fs.createWriteStream(zn);
       // Save to a temporary directory
@@ -136,10 +134,29 @@ class FileHashAgent extends EventEmitter {
       input.pipe(z).pipe(output);
     };;
 
-    this.emit('all_ready', {md64, mdHex: mdH, pb64: p64, pHex: pH, vURL: {
-      md5: path.join(this.dirname, this.basename + '.' + md64 + this.extname),
-      pool: path.join(this.dirname, this.basename + '.' + p64 + this.extname)
+    this.emit('all_ready', this.hashes = {md64, mdH, p64, pH, vURL: {
+      md5: path.posix.join(this.dir, this.base + '.' + md64 + this.ext),
+      pool: path.posix.join(this.dir, this.base + '.' + p64 + this.ext),
+      smart: path.posix.join(this.parent.relTop, p64 + '.' + md64 + this.ext)
     }});
+  }
+
+  /**
+   * @method http2push
+   * @arg {request} req
+   * @arg {response} res
+   * @arg {string} style
+   */
+  async http2push(req, res, style = 'smart') {
+    let {vURL: {[style]: URL}} = await this.onceAllReady
+    res.createPushResponse({':path': URL}, ps => {
+      let headers = this.createHeaders(req);
+      ps.respondWithFile(this.files[headers['Content-Encoding']], headers, {
+        getTrailers: this.createTrailers,
+        statCheck(stat, headers) {
+        }
+      })
+    })
   }
 
   /**
@@ -160,16 +177,14 @@ class FileHashAgent extends EventEmitter {
         ) {
           let {['Content-Encoding']: enc} = await this.setHeaders(req, res)
           fs.createReadStream(this.files[enc]).pipe(res);
-          return await this.setTrailers(req, res)
+          return this.setTrailers(req, res)
         } else {
           res.writeHead(304, SERVER)
           return res.end()
         }
       } else if (method === 'HEAD') {
-        await Promise.all([
-          this.setHeaders(req, res, 204),
-          this.setTrailers(req, res)
-        ]);
+        this.setHeaders(req, res, 204)
+        this.setTrailers(req, res)
         return res.end()
       } else {
         res.writeHead(405, `Method ${method} Not Allowed`, NOT_ALLOWED)
@@ -186,8 +201,12 @@ class FileHashAgent extends EventEmitter {
    * @arg {response} res
    * @returns {headers}
    */
-  async setHeaders(req, res, satus = 200) {
-    let headers = Object.create(null);
+  setHeaders(req, res, satus = 200) {
+    let headers = this.createHeaders(req)
+    res.writeHead(status, headers)
+    return headers;
+  }
+  createHeaders(req, headers = Object.create(null)) {
     for (const [k, v] of this.headers)
       headers[k] = typeof v !== 'function' ? v : v()
     ;;
@@ -196,12 +215,11 @@ class FileHashAgent extends EventEmitter {
     headers['Content-Encoding'] = 'identity';
 
     for (const enc of ZLIB_KEYS) {
-      if (encodings.has(enc) && this.files[enc]) {
+      if (this.files[enc] && encodings.has(enc)) {
         headers['Content-Encoding'] = enc;
         break;
       }
     }
-    res.writeHead(status, headers)
     return headers;
   }
 
@@ -211,15 +229,18 @@ class FileHashAgent extends EventEmitter {
    * @arg {response} res
    * @returns {trailers}
    */
-  async setTrailers(req, res) {
-    let t = Object.create(null)
+  setTrailers(req, res) {
+    let trailers = this.createTrailers();
+    res.addTrailers(trailers)
+    return trailers;
+  }
+  createTrailers(t = Object.create(null)) {
     for (const [k, v] of this.trailers) t[k] = typeof v !== 'function' ? v : v()
-    res.addTrailers(t)
     return t;
   }
-  url(prefix = '', style = 'hash') {
+  url(style = 'md5') {
     return this.hashes
-      ? (style === 'hash' ?  : )
+      ? this.hashes.vURL[style]
       : false
   }
 }
